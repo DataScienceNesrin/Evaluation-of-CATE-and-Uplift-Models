@@ -1,0 +1,95 @@
+# install econml package
+!pip install econml
+
+# Main imports
+from econml.metalearners import TLearner, SLearner, XLearner
+
+# Helper imports 
+import numpy as np
+from numpy.random import binomial, multivariate_normal, normal, uniform
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
+import matplotlib.pyplot as plt
+%matplotlib inline
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+# EconML imports
+from econml.dml import LinearDMLCateEstimator, ForestDMLCateEstimator
+from econml.cate_interpreter import SingleTreeCateInterpreter, SingleTreePolicyInterpreter
+import graphviz
+
+import pandas as pd
+#read the dataset
+data = pd.read_csv('http://www.minethatdata.com/Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv') 
+
+#consideration of only Womens E-Mail
+dataset = data[data['segment'].isin(['No E-Mail','Womens E-Mail'])]
+
+#conversion to binary variable 
+dataset['segment'] = dataset.segment.apply(lambda x: 1 if x == 'Womens E-Mail' else 0)
+
+#deletion of variable spend and conversion
+del dataset['spend']
+del dataset['conversion']
+
+#conversion of categorial variables into integers
+dataset['history_segment'] = dataset['history_segment'].astype("category").cat.codes
+dataset['zip_code'] = dataset['zip_code'].astype("category").cat.codes
+dataset['channel'] = dataset['channel'].astype("category").cat.codes
+
+#reset index
+dataset.reset_index(drop=True, inplace=True)
+
+train, valid = train_test_split(dataset, test_size=0.25)
+names=['recency','history_segment','history','mens','womens','zip_code','newbie','channel']
+
+Y = train['visit'].to_numpy()
+T = train['segment'].to_numpy()
+X = train[names].to_numpy()
+X_test = valid[names].to_numpy()
+
+#S-Learner
+
+est = SLearner(overall_model=GradientBoostingRegressor())
+est.fit(Y, T, np.hstack([X]), inference = 'bootstrap')
+treatment_effects = est.effect(np.hstack([X_test]))
+
+#SingleTreeCateInterpreter of S-Learner
+intrp = SingleTreeCateInterpreter(include_model_uncertainty=True, max_depth=2, min_samples_leaf=10)
+intrp.interpret(est, X_test)
+
+%matplotlib inline
+
+plt.figure(figsize=(25, 5))
+intrp.plot(feature_names=names, fontsize=12)
+
+#T-Learner
+
+est = TLearner(models=GradientBoostingRegressor())
+est.fit(Y, T, np.hstack([X]), inference = 'bootstrap')
+treatment_effects = est.effect(np.hstack([X_test]))
+
+#SingleTreeCateInterpreter of T-Learner
+intrp = SingleTreeCateInterpreter(include_model_uncertainty=True, max_depth=2, min_samples_leaf=10)
+intrp.interpret(est, X_test)
+plt.figure(figsize=(25, 5))
+intrp.plot(feature_names=names, fontsize=12)
+
+#X-Learner
+est = XLearner(models=GradientBoostingRegressor(),
+              propensity_model=GradientBoostingClassifier(),
+              cate_models=GradientBoostingRegressor())
+est.fit(Y, T, np.hstack([X]))
+treatment_effects = est.effect(np.hstack([X_test]))
+
+# Fit with bootstrap confidence interval construction enabled
+est.fit(Y, T, np.hstack([X]), inference='bootstrap')
+treatment_effects = est.effect(np.hstack([X_test]))
+lb, ub = est.effect_interval(np.hstack([X_test]), alpha=0.05) # Bootstrap CIs
+
+#SingleTreeCateInterpreter of X-Learner
+intrp = SingleTreeCateInterpreter(include_model_uncertainty=True, max_depth=2, min_samples_leaf=10)
+intrp.interpret(est, X_test)
+plt.figure(figsize=(25, 5))
+intrp.plot(feature_names=names, fontsize=12)
