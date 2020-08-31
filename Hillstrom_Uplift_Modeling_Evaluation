@@ -1,0 +1,278 @@
+import pandas as pd
+#read the dataset
+data = pd.read_csv('http://www.minethatdata.com/Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv') 
+
+#consideration of only Womens E-Mail
+dataset = data[data['segment'].isin(['No E-Mail','Womens E-Mail'])]
+
+#conversion to binary variable 
+dataset['segment'] = dataset.segment.apply(lambda x: 1 if x == 'Womens E-Mail' else 0)
+
+#deletion of variable spend and conversion
+del dataset['spend']
+del dataset['conversion']
+
+#conversion of categorial variables into integers
+dataset['history_segment'] = dataset['history_segment'].astype("category").cat.codes
+dataset['zip_code'] = dataset['zip_code'].astype("category").cat.codes
+dataset['channel'] = dataset['channel'].astype("category").cat.codes
+
+#reset index
+dataset.reset_index(drop=True, inplace=True)
+
+print(dataset)
+
+
+!pip install causalml
+import numpy as np
+from matplotlib import pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+import statsmodels.api as sm
+from xgboost import XGBRegressor
+import warnings
+  
+from causalml.inference.meta import LRSRegressor
+from causalml.inference.meta import XGBTRegressor, MLPTRegressor
+from causalml.inference.meta import BaseXRegressor, BaseRRegressor, BaseSRegressor, BaseTRegressor
+from causalml.match import NearestNeighborMatch, MatchOptimizer, create_table_one
+from causalml.propensity import ElasticNetPropensityModel
+from causalml.dataset import *
+from causalml.metrics import *
+
+warnings.filterwarnings('ignore')
+plt.style.use('fivethirtyeight')
+
+# Definition of Outcome, Covariates and Treatment variables
+y = dataset['visit']
+X = dataset.iloc[:,:8]
+treatment = dataset['segment']
+
+#Reference: https://github.com/uber/causalml/blob/master/examples/meta_learners_with_synthetic_data.ipynb
+#Fit the data to different metalearners
+
+learner_s = BaseSRegressor(learner=XGBRegressor())
+cate_s = learner_s.fit_predict(X=X, treatment=treatment, y=y)
+
+learner_t = BaseTRegressor(learner=XGBRegressor())
+cate_t = learner_t.fit_predict(X=X, treatment=treatment, y=y)
+
+learner_x = BaseXRegressor(learner=XGBRegressor())
+cate_x = learner_x.fit_predict(X=X, treatment=treatment, y=y)
+
+learner_r = BaseRRegressor(learner=XGBRegressor())
+cate_r = learner_r.fit_predict(X=X, treatment=treatment, y=y)
+
+print (cate_t)
+
+#Plot the distributions of CATE estimations
+alpha=0.2
+bins=30
+plt.figure(figsize=(12,8))
+plt.hist(cate_t, alpha=alpha, bins=bins, label='T Learner')
+plt.hist(cate_x, alpha=alpha, bins=bins, label='X Learner')
+plt.vlines(cate_s[0], 0, plt.axes().get_ylim()[1], label='S Learner',
+           linestyles='dotted', colors='red', linewidth=2)
+plt.hist(cate_r, alpha=alpha, bins=bins, label='R Learner')
+plt.title('Distribution of CATE Predictions by Meta Learners')
+plt.xlabel('CATE')
+plt.ylabel('# of Samples')
+_=plt.legend()
+
+
+# Ranking of the different Meta-Learners
+predVector_s = pd.DataFrame(np.array(cate_s))
+# ranking of the predicted values from the best to the worst
+predrank_s = -predVector_s
+predrank_s = predrank_s.rank()
+
+predVector_t = pd.DataFrame(np.array(cate_t))
+predrank_t = -predVector_t
+predrank_t = predrank_t.rank()
+
+predVector_x = pd.DataFrame(np.array(cate_x))
+predrank_x = -predVector_x
+predrank_x = predrank_x.rank()
+
+predVector_r = pd.DataFrame(np.array(cate_r))
+predrank_r = -predVector_r
+predrank_r = predrank_r.rank()
+
+# include all the predcitions in one data frame
+seg = pd.concat([dataset, predVector_s], axis=1)
+seg.rename(columns = { seg.columns[10]: "predVector_s"}, inplace = True)
+seg = pd.concat([seg, predrank_s], axis=1)
+seg.rename(columns = { seg.columns[11]: "predrank_s"}, inplace = True)
+
+seg = pd.concat([seg, predVector_t], axis=1)
+seg.rename(columns = { seg.columns[12]: "predVector_t"}, inplace = True)
+seg = pd.concat([seg, predrank_t], axis=1)
+seg.rename(columns = { seg.columns[13]: "predrank_t"}, inplace = True)
+
+seg = pd.concat([seg, predVector_x], axis=1)
+seg.rename(columns = { seg.columns[14]: "predVector_x"}, inplace = True)
+seg = pd.concat([seg, predrank_x], axis=1)
+seg.rename(columns = { seg.columns[15]: "predrank_x"}, inplace = True)
+
+seg = pd.concat([seg, predVector_r], axis=1)
+seg.rename(columns = { seg.columns[16]: "predVector_r"}, inplace = True)
+seg = pd.concat([seg, predrank_r], axis=1)
+seg.rename(columns = { seg.columns[17]: "predrank_r"}, inplace = True)
+
+seg
+
+
+#Uplift Bins
+
+# assign number of segments/bins
+Segments = 10
+
+#calculate uplift bins for T-Learner -> this can be changed regarding to the model that should be evaluated
+predVector = seg['predVector_t']
+y = seg['visit']
+ct = seg['segment']
+
+#cut the data into deciles based on the predictions
+decile = pd.qcut(seg['predrank_t'], q = Segments, duplicates='drop')
+seg['decile'] = decile
+
+#getting Rc - Number of responses per bin in the control group 
+seg2=seg[['visit','segment','decile']]
+seg2=seg2.loc[seg2['segment'] == 0]
+grouped = seg2.groupby('decile')
+Rc = grouped['visit'].sum()
+print (Rc)
+
+#getting Rt - Number of responses per bin in the treatment group 
+seg2=seg[['visit','segment','decile']]
+seg2=seg2.loc[seg2['segment'] == 1]
+grouped = seg2.groupby('decile')
+Rt = grouped['visit'].sum()
+print (Rt)
+
+#getting Nc - Number of Observations per bin in the control group
+seg2=seg[['visit','segment','decile']]
+seg2=seg2.loc[seg2['segment'] == 0]
+grouped = seg2.groupby('decile')
+Nc = grouped['visit'].size()
+print (Nc)
+
+#getting Nt - Number of Observations per bin in the treatment group
+seg2=seg[['visit','segment','decile']]
+seg2=seg2.loc[seg2['segment'] == 1]
+grouped = seg2.groupby('decile')
+Nt= grouped['visit'].size()
+print (Nt)
+
+
+#calculating the uplift per bin
+uplift=(Rt/Nt)-(Rc/Nc)
+print (uplift)
+
+#Bins of Uplift Plot for T-Learner
+data = np.array(uplift)
+ticks = np.arange(1, (uplift.count()+1))
+fig = plt.figure()
+ax = fig.add_axes([0,0,1,1])
+ax.xaxis.set_ticks(ticks)
+ax.bar(ticks, data, color = 'b', width = 0.75)
+ax.set_title('Uplift Bins')
+
+# Incremental gain per segment 
+cig=(Rt/Nt.sum())-(Rc/Nc.sum())
+
+# cumulative incremental gain
+cumincrgain = cig.cumsum()
+print(cumincrgain)
+
+# overall incremental gain
+oig = (Rt.sum()/Nt.sum())-(Rc.sum()/Nc.sum())
+nr_deciles=Rt.count()
+oig= np.repeat(oig, nr_deciles, axis=0)
+Segm= np.repeat(nr_deciles, nr_deciles, axis=0)
+print (oig)
+
+
+# calculate random curve
+Rand=oig/Segm
+Rand_curve= Rand.cumsum()
+Rand_curve
+
+Rand_curve = np.append(0, Rand_curve)
+cumincrgain = np.append(0, cumincrgain)
+
+# define x-axis
+x_axis= np.arange(0, 100+(100/(len(cumincrgain)-1)), 100/(len(cumincrgain)-1))
+
+# plot Qini Curve
+fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(8, 6))
+ax.plot(x_axis,cumincrgain, label='Model', color='blue')
+ax.plot(x_axis, Rand_curve, label='Random', color='grey')
+ax.set_title('Qini Curve')
+
+#plot Qini and Perfect Curve with Scikit-Uplift
+# install scikit-uplift package
+!pip install scikit-uplift
+from sklift.metrics import qini_auc_score
+from sklift.viz import plot_qini_curve
+
+# Plot Qini Curve of T-Learner with Scikit-Uplift and plot perfect curve
+plot_qini_curve(y_true=seg['visit'], uplift=seg['predVector_t'], treatment=seg['segment'])
+
+# usage of CausalML to compare the results
+# include all learner predictions in one variable
+cate_s, cate_t, cate_x, cate_r = pd.DataFrame(cate_s), pd.DataFrame(cate_t), pd.DataFrame(cate_x), pd.DataFrame(cate_r)
+cate_s, cate_t, cate_x, cate_r = cate_s.rename(index=str, columns={0:'cate_s'}), cate_t.rename(index=str, columns={0:'cate_t'}), cate_x.rename(index=str, columns={0:'cate_x'}), cate_r.rename(index=str, columns={0:'cate_r'})
+learner = pd.DataFrame({'y': list(dataset['visit']), 'w': list(dataset['segment']), 'S-Learner': list(cate_s['cate_s']),
+'T-Learner': list(cate_t['cate_t']),'X-Learner': list(cate_x['cate_x']),'R-Learner': list(cate_r['cate_r'])})
+
+# Qini Curve of the different learners with CausalML
+plot_qini(learner, outcome_col='y', treatment_col='w')
+
+# Uplift Curve of the different learners
+plot_gain(learner, outcome_col='y', treatment_col='w')
+
+# Plot of lift curves
+plot_lift(learner, outcome_col='y', treatment_col='w')
+
+#Area under the Uplift-Curve
+x = np.linspace(start=1/len(cumincrgain), stop=1, num=len(cumincrgain)).round(1)
+y = np.array(cumincrgain)
+AUC = 0;
+
+for i in range(1,len(y)):
+ width = x[i] - x[i-1]
+ height = y[i] + y[i-1]
+ AUCSegment = 0.5*width*height
+ AUC =  AUC + AUCSegment
+print (AUC)
+
+#Top segment of the AUUC
+AUC1 = 0.5*(x[1]-x[0])*(y[1]+y[0])
+
+#Area under the random curve
+x = np.linspace(start=(1/len(cumincrgain)), stop=1, num=len(cumincrgain)).round(1)
+y = Rand_curve
+AUCrand = 0;
+for i in range(1,len(y)):
+  width = x[i] - x[i-1]
+  height = y[i] + y[i-1]
+  AUCrandSegment = 0.5*width*height
+  AUCrand = AUCrand + AUCrandSegment
+print (AUCrand)
+
+#Top segment
+AUCrand1 = 0.5*(x[1]-x[0])*(y[1]+y[0])
+
+
+#Difference of the areas: Qini-coefficient
+Qini = AUC - AUCrand
+
+#Qini top segment
+QiniTop= AUC1-AUCrand1
+
+print(Qini)
+print(QiniTop)
+
+# with CausalML
+print(qini_score(learner, outcome_col='y', treatment_col='w'))
